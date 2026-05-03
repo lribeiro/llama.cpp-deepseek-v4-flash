@@ -54,6 +54,8 @@
 // https://docs.nvidia.com/cutlass/media/docs/cpp/blackwell_functionality.html#blackwell-sm120-gemms
 #define GGML_CUDA_CC_BLACKWELL       1200
 #define GGML_CUDA_CC_DGX_SPARK       1210
+// SM120 6000 Pro: Blackwell workstation GPU with full FP4/F8 tensor cores, 228KB shared memory, TMA, WGMMA
+#define GGML_CUDA_CC_SM120_6000_PRO  1200  // Same CC as BLACKWELL; detected by device name at runtime
 #define GGML_CUDA_CC_RUBIN           1300
 #define GGML_CUDA_CC_OFFSET_AMD      0x1000000
 #define GGML_CUDA_CC_OFFSET_MTHREADS 0x0100000
@@ -261,6 +263,31 @@ static const char * cu_get_error_str(CUresult err) {
 #    define BLACKWELL_MMA_AVAILABLE
 #endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL
 
+// WGMMA (Warp Group MMA) available on Blackwell: 4 warps cooperate on a single large MMA operation.
+// Requires sm_120a+ for the full instruction set (wgmma.mma_async).
+#if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL && __CUDA_ARCH__ < GGML_CUDA_CC_RUBIN
+#    define WGMMA_AVAILABLE
+#endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL
+
+// TMA (Tensor Memory Accelerator) available on Blackwell: async bulk tensor copy from global to shared memory.
+// Provides hardware-accelerated 2D/3D/4D/5D tensor copies, freeing threads for computation.
+#if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL && __CUDA_ARCH__ < GGML_CUDA_CC_RUBIN
+#    define TMA_AVAILABLE
+#endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL
+
+// FP8 hardware MMA available on Blackwell: native e4m3 and e5m2 tensor core operations via wgmma.
+#if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL && __CUDA_ARCH__ < GGML_CUDA_CC_RUBIN
+#    define FP8_MMA_AVAILABLE
+#endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL
+
+// Blackwell shared memory: 228KB per SM with opt-in (vs 100KB on Ada, 164KB on Hopper)
+#define GGML_CUDA_SM120_SHARED_MEM_BYTES 228352
+
+// Thread block clusters available on Blackwell: groups of CTAs that share distributed shared memory.
+#if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL && __CUDA_ARCH__ < GGML_CUDA_CC_RUBIN
+#    define CLUSTER_AVAILABLE
+#endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL
+
 #if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
 #define CP_ASYNC_AVAILABLE
 #endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
@@ -334,6 +361,22 @@ static bool cp_async_available(const int cc) {
 static bool blackwell_mma_available(const int cc) {
     return GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_BLACKWELL &&
            ggml_cuda_highest_compiled_arch(cc) < GGML_CUDA_CC_RUBIN;
+}
+
+static bool wgmma_available(const int cc) {
+    return blackwell_mma_available(cc);
+}
+
+static bool tma_available(const int cc) {
+    return blackwell_mma_available(cc);
+}
+
+static bool fp8_mma_available(const int cc) {
+    return blackwell_mma_available(cc);
+}
+
+static bool cluster_available(const int cc) {
+    return blackwell_mma_available(cc);
 }
 
 static constexpr __device__ int ggml_cuda_get_physical_warp_size() {

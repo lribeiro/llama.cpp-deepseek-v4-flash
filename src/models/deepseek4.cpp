@@ -1197,8 +1197,8 @@ llm_build_deepseek4::llm_build_deepseek4(const llama_model & model, const llm_gr
                 v_all = k_raw;
                 attn_mask = inp_attn->self_kq_mask_swa;
 
-                if (n_comp_visible > 0) {
-                    ggml_tensor * kv_comp_cache = dsv4_cache_view_3d(ctx0, mctx_dsv4->get_dsv4_attn_k(ctx0, il, seq_id), n_comp_visible);
+                 if (n_comp_visible > 0) {
+                     ggml_tensor * kv_comp_cache = dsv4_cache_view_3d(ctx0, mctx_dsv4->get_dsv4_attn_k(ctx0, il, seq_id), n_comp_visible);
                     k_all = ggml_concat(ctx0, k_raw, kv_comp_cache, 2);
                     v_all = k_all;
 

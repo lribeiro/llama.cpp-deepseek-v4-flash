@@ -22,10 +22,12 @@
 #include "ggml-cuda/cumsum.cuh"
 #include "ggml-cuda/diagmask.cuh"
 #include "ggml-cuda/diag.cuh"
+#include "ggml-cuda/dsv4.cuh"
 #include "ggml-cuda/fattn.cuh"
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
 #include "ggml-cuda/mmf.cuh"
+#include "ggml-cuda/mmf-wgmma.cuh"
 #include "ggml-cuda/mmq.cuh"
 #include "ggml-cuda/mmvf.cuh"
 #include "ggml-cuda/mmvq.cuh"
@@ -300,6 +302,14 @@ static ggml_cuda_device_info ggml_cuda_init() {
         // TODO: Check for future drivers the default scheduling strategy and
         // remove this call again when cudaDeviceScheduleSpin is default.
         if (prop.major == 12 && prop.minor == 1) {
+            CUDA_CHECK(cudaSetDevice(id));
+            CUDA_CHECK(cudaSetDeviceFlags(cudaDeviceScheduleSpin));
+        }
+
+        // SM120 6000 Pro (Blackwell workstation) optimization:
+        // Use spinning scheduling for lowest latency on dedicated GPUs.
+        // The 6000 Pro is always a discrete GPU running compute workloads.
+        if (prop.major == 12 && prop.minor == 0) {
             CUDA_CHECK(cudaSetDevice(id));
             CUDA_CHECK(cudaSetDeviceFlags(cudaDeviceScheduleSpin));
         }
@@ -2952,6 +2962,21 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_FILL:
             ggml_cuda_op_fill(ctx, dst);
             break;
+        case GGML_OP_DSV4_ROPE_TAIL:
+            ggml_cuda_op_dsv4_rope_tail(ctx, dst);
+            break;
+        case GGML_OP_DSV4_FP8_KV_QUANTIZE:
+            ggml_cuda_op_dsv4_fp8_kv_quantize(ctx, dst);
+            break;
+        case GGML_OP_DSV4_HC_SPLIT_SINKHORN:
+            ggml_cuda_op_dsv4_hc_split_sinkhorn(ctx, dst);
+            break;
+        case GGML_OP_DSV4_HC_WEIGHTED_SUM:
+            ggml_cuda_op_dsv4_hc_weighted_sum(ctx, dst);
+            break;
+        case GGML_OP_DSV4_HC_EXPAND:
+            ggml_cuda_op_dsv4_hc_expand(ctx, dst);
+            break;
         default:
             return false;
     }
@@ -5174,6 +5199,13 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_SOLVE_TRI:
             return true;
 
+        case GGML_OP_DSV4_ROPE_TAIL:
+        case GGML_OP_DSV4_FP8_KV_QUANTIZE:
+        case GGML_OP_DSV4_HC_SPLIT_SINKHORN:
+        case GGML_OP_DSV4_HC_WEIGHTED_SUM:
+        case GGML_OP_DSV4_HC_EXPAND:
+            return true;
+
         default:
             return false;
     }
@@ -5321,6 +5353,27 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t 
                 features.push_back({ "BLACKWELL_NATIVE_FP4", "1"});
                 break;
             }
+        }
+    }
+
+    // Report SM120-specific features for Blackwell 6000 Pro and similar GPUs
+    {
+        const auto & info = ggml_cuda_info();
+        for (int id = 0; id < info.device_count; ++id) {
+            const int cc = info.devices[id].cc;
+            if (wgmma_available(cc)) {
+                features.push_back({ "WGMMA", "1"});
+            }
+            if (tma_available(cc)) {
+                features.push_back({ "TMA", "1"});
+            }
+            if (fp8_mma_available(cc)) {
+                features.push_back({ "FP8_MMA", "1"});
+            }
+            if (cluster_available(cc)) {
+                features.push_back({ "CLUSTER_LAUNCH", "1"});
+            }
+            break;
         }
     }
 

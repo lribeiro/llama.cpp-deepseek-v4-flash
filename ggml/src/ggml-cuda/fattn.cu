@@ -168,8 +168,16 @@ static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, gg
                     break;
                 }
                 if (cc >= GGML_CUDA_CC_BLACKWELL) {
-                    if (Q->ne[1] <= 4 && K->ne[1] >= 65536) {
+                    // Blackwell SM120 (6000 Pro): 228KB shared memory allows larger ncols1
+                    // for better tensor core utilization with DeepSeek V4's DKQ=576 attention.
+                    // The Blackwell flash attention configs use 2-stage pipelining and
+                    // larger nbatch values to maximize memory bandwidth utilization.
+                    if (Q->ne[1] <= 8) {
                         ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512, 16>(ctx, dst);
+                        break;
+                    }
+                    if (Q->ne[1] <= 16) {
+                        ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512, 8>(ctx, dst);
                         break;
                     }
                     ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<576, 512, 4>(ctx, dst);
@@ -405,7 +413,10 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     // If Turing tensor cores are available, use them:
     if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
-        if (can_use_vector_kernel) {
+        // On Blackwell SM120 (6000 Pro), the MMA kernel with larger batch configs
+        // outperforms VEC even at batch_size=1 for most head dimensions, so prefer MMA.
+        const bool prefer_mma_over_vec = blackwell_mma_available(cc);
+        if (can_use_vector_kernel && !prefer_mma_over_vec) {
             if (!ggml_is_quantized(K->type) && !ggml_is_quantized(V->type)) {
                 if (cc >= GGML_CUDA_CC_ADA_LOVELACE && Q->ne[1] == 1 && Q->ne[3] == 1 && !(gqa_ratio > 4 && K->ne[1] >= 8192)) {
                     return BEST_FATTN_KERNEL_VEC;

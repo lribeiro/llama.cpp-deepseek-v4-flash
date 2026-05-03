@@ -79,6 +79,77 @@ static constexpr __host__ __device__ fattn_mma_config ggml_cuda_fattn_mma_get_co
     return fattn_mma_config(32, 1, 0, 0, 0, 0, 0, false);
 }
 
+// Blackwell SM120 6000 Pro optimized flash attention configs.
+// Key differences from Ampere: 228KB shared memory allows larger nbatch_fa/nbatch_K2/nbatch_V2,
+// TMA enables async bulk copies that free threads for compute,
+// and WGMMA provides 4x higher tensor core throughput.
+// We use nstages_target=2 (pipelined loads) since cp.async and TMA both support it well.
+// For the DeepSeek V4 DKQ=576 case, we can fit more K/V rows in shared memory
+// due to the 228KB limit vs 100KB on Ada/164KB on Hopper.
+//
+// IMPORTANT: nbatch_V2 must satisfy DV % (2*nbatch_V2) == 0,
+// and nbatch_K2 must satisfy DKQ % (2*nbatch_K2) == 0.
+// nbatch_combine must satisfy (DV/2) % nbatch_combine == 0.
+// nbatch_fa must satisfy nbatch_fa % 32 == 0 and nbatch_fa % (np*T_C_KQ::I) == 0 etc.
+// nstages_target must be 1 when V_is_K_view=true (DeepSeek V4 MLA) because
+//   multi-stage loading is not compatible with K data reuse.
+static constexpr __host__ __device__ fattn_mma_config ggml_cuda_fattn_mma_get_config_blackwell(const int DKQ, const int DV, const int ncols) {
+    // DKQ=64, DV=64: Small attention heads - maximize batch and pipeline depth
+    // Constraint: nbatch_V2 <= DV/2 = 32, nbatch_K2 <= DKQ/2 = 32
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE( 64,  64,  8, 128, 4, 128,  32,  32,  32, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE( 64,  64, 16, 128, 4,  64,  32,  32,  32, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE( 64,  64, 32, 128, 4,  64,  32,  32,  32, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE( 64,  64, 64, 128, 2,  64,  32,  32,  32, 2, true);
+
+    // DKQ=80, DV=80: nbatch_V2 <= 40, nbatch_K2 <= 40
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE( 80,  80,  8, 128, 4, 128,  40,  40,  40, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE( 80,  80, 16, 128, 4,  64,  40,  40,  40, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE( 80,  80, 32, 128, 4,  64,  40,  40,  40, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE( 80,  80, 64, 128, 2,  64,  40,  40,  40, 2, true);
+
+    // DKQ=96, DV=96: nbatch_V2 <= 48, nbatch_K2 <= 48
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE( 96,  96,  8, 128, 4, 128,  48,  48,  48, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE( 96,  96, 16, 128, 4,  64,  48,  48,  48, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE( 96,  96, 32, 128, 4,  64,  48,  48,  48, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE( 96,  96, 64, 128, 2,  64,  48,  48,  48, 2, true);
+
+    // DKQ=112, DV=112: nbatch_V2 <= 56, nbatch_K2 <= 56
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(112, 112,  8, 128, 4, 128,  56,  56,  56, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(112, 112, 16, 128, 4,  64,  56,  56,  56, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(112, 112, 32, 128, 4,  64,  56,  56,  56, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(112, 112, 64, 128, 2,  64,  56,  56,  56, 2, true);
+
+    // DKQ=128, DV=128: nbatch_V2 <= 64, nbatch_K2 <= 64
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(128, 128,  8, 128, 4, 128,  64,  64,  64, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(128, 128, 16, 128, 4,  64,  64,  64,  64, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(128, 128, 32, 128, 4,  64,  64,  64,  64, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(128, 128, 64, 128, 2,  64,  64,  64,  64, 2, true);
+
+    // DKQ=256, DV=256: Larger heads - nbatch_V2 <= 128, nbatch_K2 <= 128
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(256, 256,  8, 128, 4, 128, 128, 128, 128, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(256, 256, 16, 128, 4,  64, 128, 128, 128, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(256, 256, 32, 128, 4,  64, 128, 128, 128, 2, true);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(256, 256, 64, 128, 2,  64, 128, 128, 128, 2, true);
+
+    // DKQ=512, DV=512: Very large heads - Blackwell's 228KB shared mem helps significantly
+    // nbatch_V2 <= 256, nbatch_K2 <= 256
+    // Use nstages=1 because V_is_K_view may be true for large head dims
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(512, 512,  8, 128, 4,  64, 256, 256, 128, 1, false);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(512, 512, 16, 128, 4,  64, 256, 256, 128, 1, false);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(512, 512, 32, 128, 4,  64, 256, 128, 128, 1, false);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(512, 512, 64, 256, 2,  64, 256, 128, 128, 1, false);
+
+    // DKQ=576, DV=512: DeepSeek V4 compressed KV attention
+    // nbatch_V2 <= 256 (DV/2), nbatch_K2 <= 288 (DKQ/2)
+    // Use nstages=1 because V_is_K_view is true for DeepSeek V4 MLA
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(576, 512,  8, 128, 4,  64, 288, 256, 128, 1, false);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(576, 512, 16, 128, 4,  64, 288, 256, 128, 1, false);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(576, 512, 32, 128, 4,  64, 160, 128, 128, 1, false);
+    GGML_CUDA_FATTN_MMA_CONFIG_CASE(576, 512, 64, 256, 2,  64, 160, 128, 128, 1, false);
+
+    return fattn_mma_config(32, 1, 0, 0, 0, 0, 0, false);
+}
+
 static constexpr __host__ __device__ fattn_mma_config ggml_cuda_fattn_mma_get_config_turing(const int DKQ, const int DV, const int ncols) {
     GGML_CUDA_FATTN_MMA_CONFIG_CASE(256, 256,  8, 128, 2,  64, 128, 128, 128, 2, true);
     GGML_CUDA_FATTN_MMA_CONFIG_CASE(256, 256, 16, 128, 2,  64, 128, 128, 128, 2, true);
@@ -169,6 +240,9 @@ static constexpr __host__ __device__ fattn_mma_config ggml_cuda_fattn_mma_get_co
 }
 
 static __host__ fattn_mma_config ggml_cuda_fattn_mma_get_config(const int DKQ, const int DV, const int ncols, const int cc) {
+    if (blackwell_mma_available(cc)) {
+        return ggml_cuda_fattn_mma_get_config_blackwell(DKQ, DV, ncols);
+    }
     if (ampere_mma_available(cc)) {
         return ggml_cuda_fattn_mma_get_config_ampere(DKQ, DV, ncols);
     }
@@ -186,7 +260,9 @@ static __host__ fattn_mma_config ggml_cuda_fattn_mma_get_config(const int DKQ, c
 }
 
 static constexpr __device__ fattn_mma_config ggml_cuda_fattn_mma_get_config(const int DKQ, const int DV, const int ncols) {
-#if defined(AMPERE_MMA_AVAILABLE)
+#if defined(BLACKWELL_MMA_AVAILABLE)
+    return ggml_cuda_fattn_mma_get_config_blackwell(DKQ, DV, ncols);
+#elif defined(AMPERE_MMA_AVAILABLE)
     return ggml_cuda_fattn_mma_get_config_ampere(DKQ, DV, ncols);
 #elif defined(TURING_MMA_AVAILABLE)
     return ggml_cuda_fattn_mma_get_config_turing(DKQ, DV, ncols);
@@ -199,7 +275,7 @@ static constexpr __device__ fattn_mma_config ggml_cuda_fattn_mma_get_config(cons
 #else
     GGML_UNUSED_VARS(DKQ, DV, ncols);
     return fattn_mma_config(32, 1, 0, 0, 0, 0, 0, false);
-#endif // defined(AMPERE_MMA_AVAILABLE)
+#endif // defined(BLACKWELL_MMA_AVAILABLE)
 }
 
 static __host__ int ggml_cuda_fattn_mma_get_nthreads(const int DKQ, const int DV, const int ncols, const int cc) {

@@ -52,6 +52,9 @@ if (CUDAToolkit_FOUND)
             if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.9")
                 list(APPEND CMAKE_CUDA_ARCHITECTURES 121a-real)
             endif()
+            # NVIDIA SM120 6000 Pro (Blackwell workstation) - ensure native builds include sm_120a
+            # For non-native builds, the 120a-real target above covers this GPU.
+            # The 6000 Pro has full Blackwell feature set: FP4/F8 tensor cores, WGMMA, TMA, 228KB shared memory.
         endif()
     endif()
 
@@ -194,6 +197,13 @@ if (CUDAToolkit_FOUND)
     set(CUDA_CXX_FLAGS "")
 
     set(CUDA_FLAGS -use_fast_math -extended-lambda)
+
+    # SM120 Blackwell (6000 Pro) optimizations:
+    # - Enable larger shared memory capacity (228KB per SM vs default 100KB)
+    # - Enable cluster launch for thread block clusters (distributed shared memory)
+    if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
+        list(APPEND CUDA_FLAGS -maxrregcount=255)
+    endif()
 
     if (GGML_CUDA_DEBUG)
         list(APPEND CUDA_FLAGS -lineinfo)

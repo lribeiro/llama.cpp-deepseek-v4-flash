@@ -104,6 +104,11 @@ struct tile_x_sizes {
 };
 
 static int get_mmq_x_max_host(const int cc) {
+    // Blackwell SM120 (6000 Pro) has 228KB shared memory per SM, allowing larger tile sizes.
+    // The larger shared memory reduces register spilling and increases L1 hit rate for MMQ.
+    if (blackwell_mma_available(cc)) {
+        return 256;  // 2x the Ampere/Turing tile size thanks to 228KB shared memory
+    }
     return (turing_mma_available(cc) || amd_wmma_available(cc)) ? 128 :
         GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA ?
 #ifdef GGML_CUDA_FORCE_MMQ
@@ -114,7 +119,9 @@ static int get_mmq_x_max_host(const int cc) {
 }
 
 static constexpr __device__ int get_mmq_x_max_device() {
-#if defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+#if defined(BLACKWELL_MMA_AVAILABLE)
+    return 256;  // Blackwell SM120: 228KB shared memory allows larger tiles
+#elif defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     return 128;
 #else // defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
 
@@ -137,6 +144,9 @@ static constexpr __device__ int get_mmq_x_max_device() {
 }
 
 static int get_mmq_y_host(const int cc) {
+    // Note: mmq_y is constrained by the kernel writeback structure:
+    //   mmq_y must equal nwarps * tile_C::I where nwarps=8 and tile_C::I=16, giving mmq_y=128.
+    // On Blackwell, we keep mmq_y=128 but increase mmq_x to 256 (via get_mmq_x_max_host).
     return GGML_CUDA_CC_IS_AMD(cc) ? (GGML_CUDA_CC_IS_RDNA1(cc) ? 64 : 128) :
         ((GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_VOLTA) ? 128 : 64);
 }
@@ -150,6 +160,8 @@ static constexpr __device__ int get_iter_k([[maybe_unused]] const ggml_type type
 }
 
 static constexpr __device__ int get_mmq_y_device() {
+    // mmq_y is constrained by nwarps*tile_C::I = 8*16 = 128 for NVIDIA, 8*64 = 512 for AMD CDNA.
+    // On Blackwell, we keep mmq_y=128 but benefit from the larger mmq_x=256.
 #if defined(GGML_USE_HIP)
 #if defined(RDNA1)
     return 64;
@@ -263,6 +275,10 @@ static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
 #define MMQ_TILE_Y_FP4_K MMQ_TILE_Y_K
 
 static int mmq_get_granularity_host(const int mmq_x, const int cc) {
+    if (blackwell_mma_available(cc)) {
+        // Blackwell SM120: WGMMA allows 64-wide granularity for optimal throughput
+        return mmq_x >= 128 ? 64 : 32;
+    }
     if (amd_mfma_available(cc) || amd_wmma_available(cc)) {
         return mmq_x >= 128 ? 32 : 16;
     } else if (turing_mma_available(cc) && mmq_x >= 48) {
@@ -272,7 +288,11 @@ static int mmq_get_granularity_host(const int mmq_x, const int cc) {
     }
 }
 
-#if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+#if defined(BLACKWELL_MMA_AVAILABLE)
+static constexpr __device__ int mmq_get_granularity_device(const int mmq_x) {
+    return mmq_x >= 128 ? 64 : 32;
+}
+#elif defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
 static constexpr __device__ int mmq_get_granularity_device(const int mmq_x) {
     return mmq_x >= 128 ? 32 : 16;
 }
@@ -284,7 +304,7 @@ static constexpr __device__ int mmq_get_granularity_device(const int mmq_x) {
 static constexpr __device__ int mmq_get_granularity_device(const int /*mmq_x*/) {
     return 8;
 }
-#endif // AMD_MFMA_AVAILABLE
+#endif // BLACKWELL_MMA_AVAILABLE
 
 #if defined(GGML_USE_HIP)
 static int mmq_get_nwarps_host(const int cc, const int warp_size) {
